@@ -1,0 +1,151 @@
+# Load fixture for perf analysis. NOT a demo fixture.
+#
+# Why this exists rather than reusing demo/02-cel-scaling.yaml: those NodePools pin
+# `node.kubernetes.io/instance-type` to exactly one value each (m5.large,
+# m5.xlarge). That is right for the demo -- it makes the per-instance-type
+# resolution legible -- but it suppresses the exact cost you are trying to measure.
+# CEL evaluation happens once per instance type inside
+# instancetype.(*DefaultResolver).Resolve, so a 1-instance-type NodePool does 3 CEL
+# evaluations and a 800-instance-type NodePool does ~2400. Only the second one
+# shows up in a profile.
+#
+# So: no instance-type restriction, and several expressions per NodeClass.
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: perf-cel
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    # Six expressions, so each instance type costs six evaluations rather than
+    # one. Deliberately includes nested min/max and the max_pods input variable to
+    # exercise the custom overloads and not just arithmetic.
+    maxPods: "min(110, max(10, vcpus * 8))"
+    kubeReserved:
+      cpu: "max(60, vcpus * 30)"
+      memory: "memory_mib / 100"
+      # ephemeral-storage is emitted in GIBIBYTES (formatResourceResult in
+      # pkg/cel/environment.go), unlike memory's MiB. So the divisor here is
+      # memory_mib -> GiB, not memory_mib -> MiB: an expression sized like the
+      # memory one above would reserve a four-digit number of GiB.
+      ephemeral-storage: "min(10, max(1, memory_mib / 16384))"
+    systemReserved:
+      cpu: "max(20, vcpus * 10)"
+      memory: "max(64, memory_mib / 200)"
+---
+# Static-value control. Identical shape, zero expressions. Reconciling this one
+# exercises every code path in the change EXCEPT CEL evaluation -- the open-map
+# strict decode, validateKubeletFieldsSupported, validateKubeletSemantics. Diffing
+# a profile of this against perf-cel isolates CEL from the rest of the feature.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: perf-static
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    maxPods: 58
+    kubeReserved:
+      cpu: 60m
+      memory: 80Mi
+      ephemeral-storage: 1Gi
+    systemReserved:
+      cpu: 20m
+      memory: 64Mi
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: perf-cel
+spec:
+  template:
+    spec:
+      # No instance-type key on purpose -- see the comment at the top of the file.
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: perf-cel
+      expireAfter: 720h
+  # Low enough that a runaway churn loop cannot spend real money.
+  limits:
+    cpu: 16
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: perf-static
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: perf-static
+      expireAfter: 720h
+  limits:
+    cpu: 16
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+---
+# Scaled to 0 by default so applying this file launches nothing. Scale it up when
+# you want provisioning (i.e. scheduling-loop) cost in the profile as well:
+#   kubectl scale deploy/perf-load --replicas=20
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perf-load
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: perf-load
+  template:
+    metadata:
+      labels:
+        app: perf-load
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: perf-cel
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 500m

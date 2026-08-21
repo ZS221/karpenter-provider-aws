@@ -1,0 +1,111 @@
+# Scratchpad for live "what if I set THIS instead?" testing during the talk.
+#
+# Named demo-live so it never collides with a scripted beat (01-extended.yaml owns
+# demo-1-extended; editing that name here would hijack beat 1 and drift its node).
+# The demo- prefix keeps it inside `./cleanup.sh demo`'s sweep.
+#
+# Live loop:
+#   go run ./demo/preflight demo/demo-live.yaml     # offline gate, same validation code
+#   kubectl apply -f demo/demo-live.yaml            # READ the output: 3 objects
+#   kubectl get ec2nodeclass demo-live -w           # gate on ValidationSucceeded (seconds)
+#   kubectl get nodeclaims -o wide -w               # watch the launch (~2-4 min)
+#   kubectl get nodes -l karpenter.sh/nodepool=demo-live -w
+#   NODE=$(kubectl get nodes -l karpenter.sh/nodepool=demo-live -o jsonpath='{.items[0].metadata.name}')
+#   kubectl get --raw "/api/v1/nodes/${NODE}/proxy/configz" | python3 -m json.tool
+#   ./demo/cleanup.sh demo
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-live
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    # --- fields the OLD closed struct already supported ---
+    evictionHard:
+      memory.available: 10%
+    evictionSoft:
+      memory.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    cpuCFSQuota: false
+
+    # --- fields ONLY possible with the extended open-map config ---
+    # Values chosen to DIFFER from the AL2023 baseline, so /configz shows a visible
+    # change rather than a coincidence. Baseline confirmed on a control node:
+    #   registryBurst 10, registryPullQPS 5, containerLogMaxSize "10Mi",
+    #   containerLogMaxFiles 5, podPidsLimit -1, topologyManagerPolicy "none",
+    #   maxParallelImagePulls absent.
+    containerLogMaxSize: 20Mi        # baseline 10Mi
+    containerLogMaxFiles: 6          # baseline 5
+    podPidsLimit: 4096               # baseline -1 (unlimited)
+    registryBurst: 20                # baseline 10
+    registryPullQPS: 10              # baseline 5
+    maxParallelImagePulls: 5         # baseline absent
+    topologyManagerPolicy: best-effort  # baseline "none"
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: demo-live
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["m5.large"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: demo-live
+      expireAfter: 720h
+  limits:
+    cpu: 20
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+---
+# The workload. Karpenter is demand-driven: with no pod selecting this NodePool,
+# nothing launches -- the NodeClass would just sit at ValidationSucceeded=True with
+# zero NodeClaims. One pause pod is enough to trigger exactly one node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-live
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-live
+  template:
+    metadata:
+      labels:
+        app: demo-live
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: demo-live
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 100m

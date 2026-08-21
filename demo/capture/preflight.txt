@@ -1,0 +1,50 @@
+
+=== 01-extended.yaml ===
+
+  demo-1-extended  (amiFamily: AL2023)
+    ACCEPT  (structural + expression checks pass)
+            unmanaged fields (AL2023-only): containerLogMaxFiles, containerLogMaxSize, maxParallelImagePulls, podPidsLimit, registryBurst, registryPullQPS, serializeImagePulls, topologyManagerPolicy
+
+=== 02-cel-scaling.yaml ===
+
+  demo-2-cel  (amiFamily: AL2023)
+    ACCEPT  (structural + expression checks pass)
+
+=== 03-invalid.yaml ===
+
+  demo-3a-uncompilable  (amiFamily: AL2023)
+    REJECT  KubeletExpressionInvalid
+            spec.kubelet.maxPods: compiling expression, ERROR: <input>:1:9: Syntax error: mismatched input '<EOF>' expecting {'[', '{', '(', '.', '-', '!', 'true', 'false', 'null', NUM_FLOAT, NUM_INT, NUM_UINT, STRING, BYTES, IDENTIFIER}
+ | min(110,
+ | ........^ (expression=min(110,)
+
+  demo-3b-eval-failure  (amiFamily: AL2023)
+    ACCEPT  (structural + expression checks pass)
+
+  demo-3c-unknown-field  (amiFamily: AL2023)
+    REJECT  InvalidKubeletConfiguration
+            - spec.kubelet: unknown field "registryBurstt"
+
+  demo-3d-semantics  (amiFamily: AL2023)
+    REJECT  InvalidKubeletConfiguration
+            - spec.kubelet.evictionHard[nodefs.available]: "150%" must be a percentage or a resource quantity
+            - spec.kubelet.evictionHard: "notarealsignal" isn't a valid eviction signal, must be one of memory.available, nodefs.available, nodefs.inodesFree, imagefs.available, imagefs.inodesFree, pid.available
+            - spec.kubelet.evictionSoft[memory.available]: has no matching evictionSoftGracePeriod
+            - spec.kubelet: imageGCHighThresholdPercent (70) must be greater than imageGCLowThresholdPercent (80)
+
+=== 04-unsupported.yaml ===
+
+  demo-4a-bottlerocket  (amiFamily: Bottlerocket)
+    ACCEPT  (structural + expression checks pass)
+            unmanaged fields (AL2023-only): registryBurst, serializeImagePulls
+            -> on Bottlerocket this becomes UnsupportedKubeletConfiguration
+
+  demo-4b-al2  (amiFamily: AL2)
+    ACCEPT  (structural + expression checks pass)
+            unmanaged fields (AL2023-only): containerLogMaxSize, podPidsLimit
+            -> on AL2 this becomes UnsupportedKubeletConfiguration
+
+  demo-4c-al2-supported  (amiFamily: AL2)
+    ACCEPT  (structural + expression checks pass)
+
+5 NodeClass(es) would be rejected.

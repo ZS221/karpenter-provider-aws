@@ -1,0 +1,28 @@
+# Scrapes Karpenter's own /metrics endpoint (port 8080) into the
+# kube-prometheus-stack Prometheus.
+#
+# NOTE: the CPU/memory panels from the guide do NOT need this -- those come from
+# cAdvisor, which kube-prometheus-stack already scrapes off every kubelet. This
+# ServiceMonitor is what gets you `go_memstats_*`, `go_goroutines`, and
+# `controller_runtime_reconcile_time_seconds{controller="nodeclass"}` -- which are
+# the metrics that can actually see the cost of the CEL work.
+#
+# The `release: kube-prometheus-stack` label is required: the chart's Prometheus
+# only selects ServiceMonitors carrying its own release label.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: karpenter
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: karpenter
+  endpoints:
+    - port: http-metrics
+      interval: 30s

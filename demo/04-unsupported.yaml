@@ -1,0 +1,84 @@
+# BEAT 4 -- Silent-drop prevention across AMI families.
+#
+# Only AL2023 renders the RAW kubelet config through to the node
+# (FeatureFlags.SupportsArbitraryKubeletConfig = true). Every other family applies
+# only the subset Karpenter explicitly maps into its bootstrap script.
+#
+# So an extended field on AL2 / Bottlerocket / Windows would be accepted, stored,
+# and then quietly thrown away at bootstrap -- the node comes up WITHOUT the
+# configuration the user asked for, and nothing anywhere says so. That is the
+# worst possible failure mode: silent, and only discoverable by SSH-ing to a node.
+#
+# These NodeClasses go ValidationSucceeded=False with reason
+# UnsupportedKubeletConfiguration instead, naming exactly which fields would be
+# dropped.
+---
+# 4a. Bottlerocket. registryBurst/serializeImagePulls are unmanaged, AND
+# podsPerCore is rejected separately: Karpenter maps podsPerCore, but Bottlerocket
+# has no setting to render it into (PodsPerCoreEnabled = false).
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-4a-bottlerocket
+spec:
+  amiFamily: Bottlerocket
+  amiSelectorTerms:
+    - alias: bottlerocket@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    registryBurst: 20
+    serializeImagePulls: false
+    podsPerCore: 10
+---
+# 4b. AL2. Same unmanaged fields, but podsPerCore IS supported here, so it is
+# absent from the error message -- the check is per-family, not a blanket denial.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-4b-al2
+spec:
+  amiFamily: AL2
+  amiSelectorTerms:
+    - alias: al2@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    containerLogMaxSize: 20Mi
+    podPidsLimit: 4096
+    podsPerCore: 10
+---
+# 4c. The SAME extended fields as 4b, on AL2, but restricted to the subset AL2
+# actually maps. This is the positive control: extended config is not
+# "AL2023-only", it is "whatever your family can actually apply".
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-4c-al2-supported
+spec:
+  amiFamily: AL2
+  amiSelectorTerms:
+    - alias: al2@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    podsPerCore: 10
+    evictionHard:
+      memory.available: 10%
+    kubeReserved:
+      cpu: "max(60, vcpus * 30)"    # CEL still works here -- it is a managed field

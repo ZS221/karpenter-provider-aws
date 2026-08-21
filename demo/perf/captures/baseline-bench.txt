@@ -1,0 +1,42 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/aws/karpenter-provider-aws/demo/perf
+cpu: Apple M4 Pro
+BenchmarkEvaluateWarm-14                	 2667114	       451.9 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateWarm-14                	 2637632	       450.6 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateWarm-14                	 2680262	       456.5 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateWarm-14                	 2605270	       447.6 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateWarm-14                	 2680298	       447.6 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateWarm-14                	 2683060	       448.2 ns/op	     364 B/op	       4 allocs/op
+BenchmarkEvaluateCold-14                	   17734	     68323 ns/op	   54220 B/op	     694 allocs/op
+BenchmarkEvaluateCold-14                	   17762	     66340 ns/op	   54213 B/op	     693 allocs/op
+BenchmarkEvaluateCold-14                	   18087	     66172 ns/op	   54216 B/op	     693 allocs/op
+BenchmarkEvaluateCold-14                	   17677	     66139 ns/op	   54217 B/op	     693 allocs/op
+BenchmarkEvaluateCold-14                	   18158	     65734 ns/op	   54208 B/op	     693 allocs/op
+BenchmarkEvaluateCold-14                	   18144	     67716 ns/op	   54225 B/op	     694 allocs/op
+BenchmarkResolveFleet-14                	     510	   2337758 ns/op	      4800 evals/op	 1823402 B/op	   30646 allocs/op
+BenchmarkResolveFleet-14                	     512	   2360804 ns/op	      4800 evals/op	 1823490 B/op	   30647 allocs/op
+BenchmarkResolveFleet-14                	     516	   2318313 ns/op	      4800 evals/op	 1823392 B/op	   30646 allocs/op
+BenchmarkResolveFleet-14                	     516	   2463230 ns/op	      4800 evals/op	 1823523 B/op	   30647 allocs/op
+BenchmarkResolveFleet-14                	     511	   2380105 ns/op	      4800 evals/op	 1823465 B/op	   30646 allocs/op
+BenchmarkResolveFleet-14                	     502	   2380914 ns/op	      4800 evals/op	 1823448 B/op	   30646 allocs/op
+BenchmarkResolveResourceMap-14          	     784	   1571180 ns/op	 1210888 B/op	   20431 allocs/op
+BenchmarkResolveResourceMap-14          	     775	   1646184 ns/op	 1210783 B/op	   20430 allocs/op
+BenchmarkResolveResourceMap-14          	     633	   1752877 ns/op	 1210951 B/op	   20431 allocs/op
+BenchmarkResolveResourceMap-14          	     745	   1547146 ns/op	 1210793 B/op	   20430 allocs/op
+BenchmarkResolveResourceMap-14          	     776	   1539840 ns/op	 1210789 B/op	   20430 allocs/op
+BenchmarkResolveResourceMap-14          	     780	   1540331 ns/op	 1210728 B/op	   20429 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4634	    254057 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4741	    253245 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4773	    260764 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4765	    258277 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4741	    259304 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkResolveResourceMapStatic-14    	    4738	    253508 ns/op	  268800 B/op	    1600 allocs/op
+BenchmarkNewEnvironment-14              	  185077	      6783 ns/op	    8129 B/op	     122 allocs/op
+BenchmarkNewEnvironment-14              	  177006	      6768 ns/op	    8129 B/op	     122 allocs/op
+BenchmarkNewEnvironment-14              	  175222	      6755 ns/op	    8128 B/op	     122 allocs/op
+BenchmarkNewEnvironment-14              	  181932	      6636 ns/op	    8129 B/op	     122 allocs/op
+BenchmarkNewEnvironment-14              	  157083	      6763 ns/op	    8128 B/op	     122 allocs/op
+BenchmarkNewEnvironment-14              	  179346	      6750 ns/op	    8127 B/op	     122 allocs/op
+PASS
+ok  	github.com/aws/karpenter-provider-aws/demo/perf	65.150s

@@ -1,0 +1,30 @@
+# Workload for BEAT 1. Without this the NodePool has nothing to schedule, so no
+# node ever launches -- and with no node there is no launch template either, which
+# is what made the UserData step silently skip itself.
+#
+# Pinned to m5.large so it is directly comparable to the demo-2-small node, which
+# is the same instance type WITHOUT evictionHard. That side-by-side is what makes
+# the eviction threshold visible.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-1-extended
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-1-extended
+  template:
+    metadata:
+      labels:
+        app: demo-1-extended
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: demo-1-extended
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 100m

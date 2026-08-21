@@ -1,0 +1,312 @@
+
+════════════════════════════════════════════════════════════════
+  Extended Kubelet Configuration + CEL -- karpenter-cel-demo
+════════════════════════════════════════════════════════════════
+  context:       arn:aws:eks:us-west-2:000000000000:cluster/karpenter-cel-demo
+  gate:          NodeClassCEL=true
+  image:         dev:cel-demo-46ac4eb4d@sha256:c16ee343449768c96f7de67e34a67ca11bd7fe38fb8f59dc8889c1b1a08bbcd3
+
+════════════════════════════════════════════════════════════════
+  BEAT 1 of 4 -- Extended kubelet configuration
+════════════════════════════════════════════════════════════════
+  spec.kubelet used to be a closed struct with ~11 hardcoded fields.
+  It is now an open map validated against the upstream k8s.io/kubelet type.
+
+▸ The configuration we are about to apply
+
+$ grep -A 30 '  kubelet:' 01-extended.yaml | grep -v '^\s*#'
+  kubelet:
+    evictionHard:
+      memory.available: 10%
+    evictionSoft:
+      memory.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    cpuCFSQuota: false
+
+    containerLogMaxSize: 20Mi        # baseline 10Mi
+    containerLogMaxFiles: 6          # baseline 5
+    podPidsLimit: 4096               # baseline -1 (unlimited)
+    registryBurst: 20                # baseline 10
+    registryPullQPS: 10              # baseline 5
+    maxParallelImagePulls: 5         # baseline absent
+    topologyManagerPolicy: best-effort  # baseline "none"
+
+
+▸ Apply it
+
+$ kubectl apply -f 01-extended.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-1-extended unchanged
+nodepool.karpenter.sh/demo-1-extended unchanged
+
+▸ Karpenter validates the whole document against k8s.io/kubelet
+  demo-1-extended
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+
+  All 15 fields accepted -- including 8 that were previously inexpressible.
+
+▸ Schedule a pod so a node actually launches
+  The fields we care about are kubelet-internal, so nothing proves they took
+  effect until a real kubelet is running with them.
+
+$ kubectl apply -f 01-workload.yaml
+deployment.apps/demo-1-extended unchanged
+
+▸ Waiting for the node to register
+  1/1 nodes ready (0s elapsed) 
+
+▸ THE PROOF -- ask the running kubelet what config it is using
+  This is the answer to 'how do I show the new fields taking effect on the node?'
+  /configz is the kubelet's own debug endpoint, reached through the API server
+  proxy. It returns the EFFECTIVE running config -- not what we asked for, but
+  what the kubelet is actually operating with.
+
+$ kubectl get --raw "/api/v1/nodes/ip-192-168-27-86.us-west-2.compute.internal/proxy/configz"
+    NEW -- only expressible with the extended config:
+      FIELD                        ASKED FOR          KUBELET RUNNING    MATCH NOTE
+      --------------------------------------------------------------------------------------
+      containerLogMaxFiles         6                  6                  yes   
+      containerLogMaxSize          "20Mi"             "20Mi"             yes   
+      maxParallelImagePulls        5                  5                  yes   
+      podPidsLimit                 4096               4096               yes   
+      registryBurst                20                 20                 yes   
+      registryPullQPS              10                 10                 yes   
+      topologyManagerPolicy        "best-effort"      "best-effort"      yes   
+
+    PRE-EXISTING -- the closed struct had these, and they still work:
+      FIELD                        ASKED FOR          KUBELET RUNNING    MATCH NOTE
+      --------------------------------------------------------------------------------------
+      cpuCFSQuota                  false              false              yes   
+      evictionHard                 {"memory.availabl  {"memory.availabl  yes   +2 defaults
+      evictionMaxPodGracePeriod    60                 60                 yes   
+      evictionSoft                 {"memory.availabl  {"memory.availabl  yes   
+      evictionSoftGracePeriod      {"memory.availabl  {"memory.availabl  yes   
+      imageGCHighThresholdPercent  85                 85                 yes   
+      imageGCLowThresholdPercent   80                 80                 yes   
+
+    14 of 14 fields applied as asked.
+    ("+N defaults" means the kubelet merged the AMI family's defaults in
+     alongside the key we set -- the value we asked for is unchanged.)
+  This is the proof. ASKED FOR is spec.kubelet as stored on the EC2NodeClass.
+  KUBELET RUNNING comes from the kubelet's own /configz endpoint. 
+
+  Both tables matter, for different reasons:
+    NEW           fields the closed struct could not express at all.
+    PRE-EXISTING  proof the open map did not regress what already worked.
+
+▸ Secondary: the UserData Karpenter rendered
+  Weaker evidence than /configz -- it proves KARPENTER emitted the fields, not
+  that the kubelet accepted them. Useful for showing the passthrough mechanism.
+  No launch template found -- it is created on first node launch.
+
+════════════════════════════════════════════════════════════════
+  BEAT 2 of 4 -- CEL expressions resolved per instance type
+════════════════════════════════════════════════════════════════
+  The headline: one manifest, one expression, different config per node.
+
+▸ The configuration -- note these are STRINGS, not numbers
+
+$ grep -A 7 '  kubelet:' 02-cel-scaling.yaml
+  kubelet:
+    maxPods: "vcpus * 8"
+    kubeReserved:
+      cpu: "max(60, vcpus * 30)"
+      memory: "memory_mib / 100"
+    systemReserved:
+      cpu: "max(20, vcpus * 10)"
+      memory: "memory_mib / 200"
+  Variables: vcpus, memory_mib, default_enis, ips_per_eni, max_pods, instance_type
+  Functions: min(), max()
+
+▸ Apply the NodeClass + two NodePools pinned to different instance sizes
+
+$ kubectl apply -f 02-cel-scaling.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-2-cel configured
+nodepool.karpenter.sh/demo-2-small unchanged
+nodepool.karpenter.sh/demo-2-large unchanged
+  demo-2-cel
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+  Validated by EVALUATING the expression against every instance type in cache,
+  not merely by compiling it.
+
+▸ Schedule one pod onto each NodePool
+
+$ kubectl apply -f 02-workload.yaml
+deployment.apps/demo-2-small unchanged
+deployment.apps/demo-2-large unchanged
+
+▸ Waiting for both nodes to register (this is the slow part, ~2-4 min)
+  2/2 nodes ready (0s elapsed) 
+
+▸ THE PAYOFF -- same expression, different resolved values
+
+$ kubectl get nodes -l 'karpenter.sh/nodepool in (demo-2-small,demo-2-large)'       -o custom-columns='NODEPOOL:.metadata.labels.karpenter\.sh/nodepool,INSTANCE:.metadata.labels.node\.kubernetes\.io/instance-type,VCPU:.status.capacity.cpu,MAXPODS:.status.allocatable.pods,ALLOC-CPU:.status.allocatable.cpu,ALLOC-MEM:.status.allocatable.memory'
+NODEPOOL       INSTANCE    VCPU   MAXPODS   ALLOC-CPU   ALLOC-MEM
+demo-2-small   m5.large    2      16        1940m       7724592Ki
+demo-2-large   m5.xlarge   4      32        3880m       15887436Ki
+
+  Expected
+    maxPods = "vcpus * 8"
+      m5.large   2 vCPU  ->  16 pods
+      m5.xlarge  4 vCPU  ->  32 pods
+
+    kubeReserved.cpu = "max(60, vcpus * 30)"
+      m5.large           ->  60m    (max(60, 60))
+      m5.xlarge          ->  120m   (max(60, 120))
+
+    systemReserved.cpu = "max(20, vcpus * 10)"
+      m5.large           ->  20m    (max(20, 20))
+      m5.xlarge          ->  40m    (max(20, 40))
+
+  ALLOC-CPU is capacity minus BOTH reservations, so the column above should read
+  1920m on m5.large (2000 - 60 - 20) and 3840m on m5.xlarge (4000 - 120 - 40).
+
+▸ Proof the resolved reservations reached the kubelet -- and the math closes
+  demo-2-small
+      kubeReserved.memory   = 96Mi    <- resolved from "memory_mib / 100"
+      systemReserved.memory = 0       <- resolved from "memory_mib / 200"
+      capacity                                     7739.5
+      - kubeReserved.memory                         -96.0
+      - systemReserved.memory                         0.0
+      - evictionHard[memory.available] (100Mi)     -100.0
+      = computed allocatable                       7543.5
+        reported allocatable                       7543.5
+        closes?                                       yes
+
+  demo-2-large
+      kubeReserved.memory   = 176Mi   <- resolved from "memory_mib / 100"
+      systemReserved.memory = 0       <- resolved from "memory_mib / 200"
+      capacity                                    15791.1
+      - kubeReserved.memory                        -176.0
+      - systemReserved.memory                         0.0
+      - evictionHard[memory.available] (100Mi)     -100.0
+      = computed allocatable                      15515.1
+        reported allocatable                      15515.1
+        closes?                                       yes
+
+  Why this matters
+    kubeReserved.memory here is not a number anyone typed -- it is
+    "memory_mib / 100" evaluated against each instance type, rounded up to a 16Mi
+    boundary, and handed to the kubelet. The arithmetic closing proves the resolved
+    value is what the kubelet is really reserving.
+
+════════════════════════════════════════════════════════════════
+  BEAT 3 of 4 -- Invalid configuration never reaches a node
+════════════════════════════════════════════════════════════════
+  ValidationSucceeded is a REQUIRED condition, so False blocks node launch.
+  These four NodeClasses have no NodePools. Nothing launches. That is the point.
+
+▸ Apply four deliberately-broken NodeClasses
+
+$ kubectl apply -f 03-invalid.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-3a-uncompilable unchanged
+ec2nodeclass.karpenter.k8s.aws/demo-3b-eval-failure unchanged
+ec2nodeclass.karpenter.k8s.aws/demo-3c-unknown-field unchanged
+ec2nodeclass.karpenter.k8s.aws/demo-3d-semantics unchanged
+
+▸ 3a. Expression does not compile          maxPods: "min(110,"
+  demo-3a-uncompilable
+    ValidationSucceeded : False
+    reason              : KubeletExpressionInvalid
+    message             : validating expression, compiling expression, ERROR: <input>:1:9:
+                          Syntax error: mismatched input '<EOF>' expecting {'[', '{', '(',
+                          '.', '-', '!', 'true', 'false', 'null', NUM_FLOAT, NUM_INT,
+                          NUM_UINT, STRING, BYTES, IDENTIFIER} | min(110, | ........^
+                          (expression=min(110,) (field=spec.kubelet.maxPods)
+
+▸ 3b. Compiles, but divides by zero        "1048576 / (vcpus - vcpus)"
+  demo-3b-eval-failure
+    ValidationSucceeded : False
+    reason              : KubeletExpressionEvaluationFailed
+    message             : evaluating kubelet resource expression, evaluating expression,
+                          division by zero (expression=1048576 / (vcpus - vcpus), instance-
+                          type=r5b.12xlarge) (expression=1048576 / (vcpus - vcpus),
+                          field=systemReserved, instance-type=r5b.12xlarge, key=memory)
+
+▸ 3c. Unknown field (typo)                 registryBurstt: 20
+  demo-3c-unknown-field
+    ValidationSucceeded : False
+    reason              : InvalidKubeletConfiguration
+    message             : spec.kubelet: unknown field "registryBurstt"
+
+▸ 3d. Semantically invalid                 4 distinct rule violations
+  demo-3d-semantics
+    ValidationSucceeded : False
+    reason              : InvalidKubeletConfiguration
+    message             : spec.kubelet.evictionHard[nodefs.available]: "150%" must be a
+                          percentage or a resource quantity; spec.kubelet.evictionHard:
+                          "notarealsignal" isn't a valid eviction signal, must be one of
+                          memory.available, nodefs.available, nodefs.inodesFree,
+                          imagefs.available, imagefs.inodesFree, pid.available;
+                          spec.kubelet.evictionSoft[memory.available]: has no matching
+                          evictionSoftGracePeriod; spec.kubelet: imageGCHighThresholdPercent
+                          (70) must be greater than imageGCLowThresholdPercent (80)
+
+  Why each one matters
+    3a  a compile check alone catches this
+    3b  a compile check does not -- only per-instance-type evaluation finds it
+    3c  the API server cannot catch this: spec.kubelet is an open map, so the
+        typo is caught by strict-decoding against k8s.io/kubelet
+    3d  all four violations decode cleanly against the Go types; they are only
+        wrong semantically, which is what validateKubeletSemantics is for
+
+  Confirm nothing launched:
+
+$ kubectl get nodeclaims -o name | grep demo-3 || echo '  (no NodeClaims for any demo-3 NodeClass -- correct)'
+  (no NodeClaims for any demo-3 NodeClass -- correct)
+
+════════════════════════════════════════════════════════════════
+  BEAT 4 of 4 -- Silent-drop prevention across AMI families
+════════════════════════════════════════════════════════════════
+  Only AL2023 renders the raw kubelet config through to the node.
+  Other families apply only the subset Karpenter explicitly maps.
+  Without this check, extra fields are accepted, stored, then quietly discarded.
+
+▸ Apply three NodeClasses on non-AL2023 families
+
+$ kubectl apply -f 04-unsupported.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-4a-bottlerocket unchanged
+ec2nodeclass.karpenter.k8s.aws/demo-4b-al2 unchanged
+ec2nodeclass.karpenter.k8s.aws/demo-4c-al2-supported unchanged
+
+▸ 4a. Bottlerocket -- unmanaged fields AND podsPerCore
+  demo-4a-bottlerocket
+    ValidationSucceeded : False
+    reason              : UnsupportedKubeletConfiguration
+    message             : spec.kubelet has fields not applied by the Bottlerocket AMI family
+                          that would be silently dropped: podsPerCore, registryBurst,
+                          serializeImagePulls
+  podsPerCore IS mapped by Karpenter, but Bottlerocket has no setting to
+  render it into (PodsPerCoreEnabled = false), so it is rejected too.
+
+▸ 4b. AL2 -- same unmanaged fields, but podsPerCore is supported here
+  demo-4b-al2
+    ValidationSucceeded : False
+    reason              : UnsupportedKubeletConfiguration
+    message             : spec.kubelet has fields not applied by the AL2 AMI family that
+                          would be silently dropped: containerLogMaxSize, podPidsLimit
+  Note podsPerCore is ABSENT from this message. The check is per-family,
+  not a blanket denial.
+
+▸ 4c. Positive control -- AL2 restricted to fields it can actually apply
+  demo-4c-al2-supported
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+
+  Accepted -- including a CEL expression on kubeReserved, a managed field.
+  Extended config is not 'AL2023-only'. It is 'whatever your family can apply'.
+
+  The point
+    The alternative to this check is a node that comes up without the
+    configuration you asked for, with nothing anywhere telling you -- only
+    discoverable by SSH-ing to the node and reading the kubelet config.
+
+════════════════════════════════════════════════════════════════
+  Done
+════════════════════════════════════════════════════════════════
+  Tear down with: ./cleanup.sh demo

@@ -1,0 +1,206 @@
+{
+  "title": "Karpenter — Extended Kubelet Config + CEL perf",
+  "uid": "karpenter-cel-perf",
+  "tags": ["karpenter", "perf", "cel"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Karpenter restarts",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "enable": true,
+        "iconColor": "red",
+        "target": {
+          "expr": "changes(kube_pod_container_status_restarts_total{namespace=\"kube-system\", pod=~\"karpenter-.*\"}[5m]) > 0",
+          "refId": "Anno"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "Read me first",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Two `karpenter-*` pods, only one does work.** `charts/karpenter/values.yaml` sets `replicas: 2` with leader election, so every panel here is broken out `by (pod)` — expect one busy series and one near-flat standby. Do not sum them and call it \"Karpenter's CPU\".\n\n**Rate windows are `[2m]`, not `[30s]`.** The scrape interval is 30s; a `[30s]` range holds one sample, and `rate()` needs two, so `[30s]` renders as gaps and dropouts. `[2m]` gives four samples per point.\n\n**Idle Karpenter looks free.** With no reconcile churn these panels are flat regardless of what your change costs. Run `./churn.sh` while you watch, and read the *Instance-type re-resolutions* panel to confirm work is actually happening.\n\n**The bottom row needs the ServiceMonitor** (`servicemonitor.yaml`). The top row comes from cAdvisor and works without it."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Karpenter CPU usage (cores)",
+      "description": "cAdvisor, per pod. Container-level truth, includes GC and runtime overhead. No ServiceMonitor required.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 3,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"kube-system\", pod=~\"karpenter-.*\", container=\"controller\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Karpenter memory — working set",
+      "description": "What the kernel would have to reclaim under pressure, and what the OOM killer compares against limits. Rises and does not come back down = leak candidate; take a heap profile.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "container_memory_working_set_bytes{namespace=\"kube-system\", pod=~\"karpenter-.*\", container=\"controller\"}",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Instance-type re-resolutions (cache misses) — is work happening?",
+      "description": "The sanity-check panel. instancetype.(*Provider) caches resolved instance types under a key that hashes the kubelet block, so an unchanged EC2NodeClass never re-runs CEL. This is nodeclass reconcile throughput as a proxy: if it is flat, your profile will be empty and every other panel here is meaningless.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{job=\"karpenter\", controller=~\"nodeclass.*\"}[2m]))",
+          "legendFormat": "{{controller}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "nodeclass reconcile latency (p50 / p99)",
+      "description": "Where the CEL cost lands in wall-clock terms. Validation evaluates every expression against every instance type in the cache, so p99 here scales with (instance types x expressions). Compare perf-cel vs perf-static churn to separate CEL from the rest of the feature.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.50, sum by (le, controller) (rate(controller_runtime_reconcile_time_seconds_bucket{job=\"karpenter\", controller=~\"nodeclass.*\"}[5m])))",
+          "legendFormat": "p50 {{controller}}"
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.99, sum by (le, controller) (rate(controller_runtime_reconcile_time_seconds_bucket{job=\"karpenter\", controller=~\"nodeclass.*\"}[5m])))",
+          "legendFormat": "p99 {{controller}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Go allocation rate (bytes/sec)",
+      "description": "The most sensitive panel for this change. EvaluateExpression builds a fresh activation map per call, and it is called once per expression per instance type — ~800 x 6 per re-resolve. Allocation rate spikes on churn even when working-set memory looks flat, because the garbage is collected promptly. Confirm with ./profile.sh allocs.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (pod) (rate(go_memstats_alloc_bytes_total{job=\"karpenter\"}[2m]))",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Go heap in use / goroutines",
+      "description": "Heap in use is the process-level counterpart to working set — it excludes the runtime's own overhead, so a gap between the two is not a leak. Goroutines should be flat; a ramp means something is being started per reconcile and never finishing.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*goroutines.*" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "go_memstats_heap_alloc_bytes{job=\"karpenter\"}",
+          "legendFormat": "heap {{pod}}"
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "go_goroutines{job=\"karpenter\"}",
+          "legendFormat": "goroutines {{pod}}"
+        }
+      ]
+    }
+  ]
+}

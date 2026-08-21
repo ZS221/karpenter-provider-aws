@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# Emit the full manifest for one input cell on stdout.
+#
+# Generated rather than three hand-written files so that the instance-type spread, the
+# NodePool shape, the workload sizing and the limits live in exactly ONE place. If the
+# spread differed between cells by even one instance type, the cells would not be
+# comparable and the whole experiment would be worthless.
+#
+#   ./render.sh static     12 legacy fields, static values   -- V0, V1, V2
+#   ./render.sh cel        same fields, CEL on 3 of them     -- V1, V2
+#   ./render.sh extended   adds 8 previously-inexpressible   -- V2 only
+#
+# The three cells differ ONLY in the spec.kubelet block. Everything else is byte-identical.
+
+set -euo pipefail
+CELL=${1:?usage: ./render.sh <static|cel|extended>}
+HERE=$(cd "$(dirname "$(realpath "$0")")" && pwd)
+source "${HERE}/../config.sh"
+
+# ---------------------------------------------------------------- instance spread
+# name:vcpus. One NodePool per entry, pinned, with limits.cpu set to exactly that type's
+# vCPU count so precisely one node can ever launch per pool -- which makes the node count
+# per burst deterministic (12) instead of dependent on Karpenter's bin-packing.
+#
+# Chosen for diversity in the variables CEL reads (vcpus, memory_mib, default_enis,
+# ips_per_eni, max_pods), not for cost: 3 families x 3 sizes plus burstable, spanning
+# 2-8 vCPU and 4-32 GiB, so every expression resolves to a different value per node.
+INSTANCE_TYPES=(
+  t3.medium:2 t3.large:2
+  c5.large:2  c5.xlarge:4  c6i.large:2
+  m5.large:2  m5.xlarge:4  m5.2xlarge:8  m6i.large:2
+  r5.large:2  r5.xlarge:4  r6i.large:2
+)
+
+NC="ab-${CELL}"
+
+# ---------------------------------------------------------------- kubelet blocks
+# static: all 12 fields V0's closed struct accepts (verified against
+# 6e13b3e0a^:pkg/apis/crds/karpenter.k8s.aws_ec2nodeclasses.yaml). This block must apply
+# unchanged on all three arms -- it is the only cell that yields a true like-for-like
+# comparison, and it is the one that answers "did you slow down the existing path".
+kubelet_static() {
+cat <<'YAML'
+    clusterDNS: ["10.100.0.10"]
+    cpuCFSQuota: true
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    podsPerCore: 10
+    maxPods: 58
+    evictionHard:
+      memory.available: 100Mi
+      nodefs.available: 10%
+      nodefs.inodesFree: 5%
+    evictionSoft:
+      memory.available: 200Mi
+      nodefs.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+      nodefs.available: 1m30s
+    kubeReserved:
+      cpu: 100m
+      memory: 200Mi
+      ephemeral-storage: 1Gi
+    systemReserved:
+      cpu: 50m
+      memory: 100Mi
+      ephemeral-storage: 1Gi
+YAML
+}
+
+# cel: identical field set, but the three fields V1 taught to accept expressions
+# (maxPods, kubeReserved, systemReserved -- PR #9326) now carry them. Every other field
+# is byte-identical to `static`, so `cel` minus `static` on the same arm isolates CEL
+# evaluation from everything else.
+#
+# ephemeral-storage is emitted in GiB, not MiB like memory -- see formatResourceResult in
+# pkg/cel/environment.go. Hence the /16384 divisor rather than a memory-like one.
+kubelet_cel() {
+cat <<'YAML'
+    clusterDNS: ["10.100.0.10"]
+    cpuCFSQuota: true
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    podsPerCore: 10
+    maxPods: "min(110, max(10, vcpus * 8))"
+    evictionHard:
+      memory.available: 100Mi
+      nodefs.available: 10%
+      nodefs.inodesFree: 5%
+    evictionSoft:
+      memory.available: 200Mi
+      nodefs.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+      nodefs.available: 1m30s
+    kubeReserved:
+      cpu: "max(100, vcpus * 30)"
+      memory: "max(200, memory_mib / 100)"
+      ephemeral-storage: "min(10, max(1, memory_mib / 16384))"
+    systemReserved:
+      cpu: "max(50, vcpus * 10)"
+      memory: "max(100, memory_mib / 200)"
+      ephemeral-storage: "min(5, max(1, memory_mib / 32768))"
+YAML
+}
+
+# extended: the cel block plus 8 fields that were inexpressible before the open map.
+# AL2023 only -- it is the sole family with SupportsArbitraryKubeletConfig = true, which
+# is also why every cell pins amiFamily: AL2023 rather than varying it.
+kubelet_extended() {
+  kubelet_cel
+cat <<'YAML'
+    containerLogMaxSize: 20Mi
+    containerLogMaxFiles: 6
+    podPidsLimit: 4096
+    registryBurst: 20
+    registryPullQPS: 10
+    serializeImagePulls: false
+    maxParallelImagePulls: 5
+    topologyManagerPolicy: best-effort
+YAML
+}
+
+case "$CELL" in
+  static)   KUBELET=$(kubelet_static) ;;
+  cel)      KUBELET=$(kubelet_cel) ;;
+  extended) KUBELET=$(kubelet_extended) ;;
+  *) die "unknown cell: ${CELL} (static|cel|extended)" ;;
+esac
+
+# ---------------------------------------------------------------- NodeClass
+cat <<YAML
+# GENERATED by inputs/render.sh ${CELL} -- do not edit by hand.
+# cell=${CELL} cluster=${CLUSTER}
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: ${NC}
+  labels:
+    ab-experiment: "true"
+    ab-cell: ${CELL}
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: ${NODE_ROLE}
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ${DISCOVERY_TAG}
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ${DISCOVERY_TAG}
+  kubelet:
+${KUBELET}
+YAML
+
+# ---------------------------------------------------------------- NodePools
+for entry in "${INSTANCE_TYPES[@]}"; do
+  IT="${entry%%:*}"; VCPU="${entry##*:}"
+  POOL="ab-${CELL}-$(echo "$IT" | tr '.' '-')"
+cat <<YAML
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ${POOL}
+  labels:
+    ab-experiment: "true"
+    ab-cell: ${CELL}
+spec:
+  template:
+    metadata:
+      labels:
+        ab-experiment: "true"
+        ab-cell: ${CELL}
+        ab-instance-type: ${IT}
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["${IT}"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ${NC}
+      expireAfter: 720h
+  # Exactly this type's vCPU count, so one node fits and a second cannot. Caps the blast
+  # radius of a runaway too: the whole cell can never exceed the 36 vCPU across all pools.
+  limits:
+    cpu: ${VCPU}
+  disruption:
+    # Consolidation OFF for the measurement window. Karpenter would otherwise churn the
+    # burst nodes on its own schedule, which adds provisioning events this harness did not
+    # ask for and cannot time -- the bursts have to be the only source of launches.
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1h
+YAML
+done
+
+# One unpinned NodePool that can never launch (limits.cpu: 0).
+#
+# Its only job is to widen instance-type resolution. getPrioritizedInstanceTypes in
+# pkg/controllers/nodeclass/validation.go unions the instance types across every NodePool
+# pointing at the NodeClass, so with only the 12 pinned pools above, CEL would be
+# evaluated against 12 instance types per reconcile. This pool drags that up to the full
+# ~800-type fleet, which is where the feature's cost actually lives -- without launching
+# anything or spending a cent.
+cat <<YAML
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ab-${CELL}-fleetwide
+  labels:
+    ab-experiment: "true"
+    ab-cell: ${CELL}
+  annotations:
+    ab-purpose: "widen instance-type resolution to the full fleet; launches nothing"
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: ${NC}
+      expireAfter: 720h
+  limits:
+    cpu: 0
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1h
+YAML
+
+# ---------------------------------------------------------------- workload
+# One Deployment per pinned pool, replicas 0. run-cell.sh scales these to 1 to start a
+# burst and back to 0 to end it. 1 CPU fits every type in the spread (smallest is 2 vCPU),
+# so a single pod reliably triggers exactly one node.
+for entry in "${INSTANCE_TYPES[@]}"; do
+  IT="${entry%%:*}"
+  POOL="ab-${CELL}-$(echo "$IT" | tr '.' '-')"
+cat <<YAML
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${POOL}
+  labels:
+    ab-experiment: "true"
+    ab-cell: ${CELL}
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: ${POOL}
+  template:
+    metadata:
+      labels:
+        app: ${POOL}
+        ab-experiment: "true"
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: ${POOL}
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 1
+YAML
+done

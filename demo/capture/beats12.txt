@@ -1,0 +1,181 @@
+
+════════════════════════════════════════════════════════════════
+  Extended Kubelet Configuration + CEL -- karpenter-cel-demo
+════════════════════════════════════════════════════════════════
+  context:       arn:aws:eks:us-west-2:000000000000:cluster/karpenter-cel-demo
+  gate:          NodeClassCEL=true
+  image:         dev:cel-demo-46ac4eb4d@sha256:c16ee343449768c96f7de67e34a67ca11bd7fe38fb8f59dc8889c1b1a08bbcd3
+
+════════════════════════════════════════════════════════════════
+  BEAT 1 of 4 -- Extended kubelet configuration
+════════════════════════════════════════════════════════════════
+  spec.kubelet used to be a closed struct with ~11 hardcoded fields.
+  It is now an open map validated against the upstream k8s.io/kubelet type.
+
+▸ The configuration we are about to apply
+
+$ grep -A 30 '  kubelet:' 01-extended.yaml | grep -v '^\s*#'
+  kubelet:
+    evictionHard:
+      memory.available: 10%
+    evictionSoft:
+      memory.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    cpuCFSQuota: false
+
+    containerLogMaxSize: 20Mi        # baseline 10Mi
+    containerLogMaxFiles: 6          # baseline 5
+    podPidsLimit: 4096               # baseline -1 (unlimited)
+    registryBurst: 20                # baseline 10
+    registryPullQPS: 10              # baseline 5
+    maxParallelImagePulls: 5         # baseline absent
+    topologyManagerPolicy: best-effort  # baseline "none"
+
+
+▸ Apply it
+
+$ kubectl apply -f 01-extended.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-1-extended unchanged
+nodepool.karpenter.sh/demo-1-extended unchanged
+
+▸ Karpenter validates the whole document against k8s.io/kubelet
+  demo-1-extended                                         
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+
+  All 15 fields accepted -- including 8 that were previously inexpressible.
+
+▸ Schedule a pod so a node actually launches
+  The fields we care about are kubelet-internal, so nothing proves they took
+  effect until a real kubelet is running with them.
+
+$ kubectl apply -f 01-workload.yaml
+deployment.apps/demo-1-extended unchanged
+
+▸ Waiting for the node to register
+  1/1 nodes ready (0s elapsed) 
+
+▸ THE PROOF -- ask the running kubelet what config it is using
+  This is the answer to 'how do I show the new fields taking effect on the node?'
+  /configz is the kubelet's own debug endpoint, reached through the API server
+  proxy. It returns the EFFECTIVE running config -- not what we asked for, but
+  what the kubelet is actually operating with.
+
+$ kubectl get --raw "/api/v1/nodes/ip-192-168-27-86.us-west-2.compute.internal/proxy/configz"
+    Only expressible with the extended config:
+      FIELD                        CONTROL (baseline)     demo-1-extended       
+      --------------------------------------------------------------------------
+      registryBurst                10                     20                      <-- CHANGED
+      registryPullQPS              5                      10                      <-- CHANGED
+      maxParallelImagePulls        "<absent>"             5                       <-- CHANGED
+      podPidsLimit                 -1                     4096                    <-- CHANGED
+      containerLogMaxSize          "10Mi"                 "20Mi"                  <-- CHANGED
+      containerLogMaxFiles         5                      6                       <-- CHANGED
+      topologyManagerPolicy        "none"                 "best-effort"           <-- CHANGED
+
+    Supported before this change too:
+      FIELD                        CONTROL (baseline)     demo-1-extended       
+      --------------------------------------------------------------------------
+      evictionHard                 {"memory.available":   {"memory.available":    <-- CHANGED
+      evictionSoftGracePeriod      "<absent>"             {"memory.available":    <-- CHANGED
+      evictionMaxPodGracePeriod    "<absent>"             60                      <-- CHANGED
+      imageGCHighThresholdPercent  85                     85                    
+      imageGCLowThresholdPercent   80                     80                    
+      cpuCFSQuota                  true                   false                   <-- CHANGED
+      maxPods                      16                     29                      <-- CHANGED
+
+  This is the proof. These are the values the kubelet is RUNNING with, read from
+  its own /configz endpoint -- not what we asked for, and not merely what Karpenter
+  rendered.
+
+  maxPods differs for an unrelated reason: demo-1-extended sets no maxPods, so it
+  falls back to the ENI-derived limit (29 on m5.large), while the control node has
+  the beat-2 CEL expression resolving to 16. Not an extended-config effect.
+
+▸ Secondary: the UserData Karpenter rendered
+  Weaker evidence than /configz -- it proves KARPENTER emitted the fields, not
+  that the kubelet accepted them. Useful for showing the passthrough mechanism.
+  No launch template found -- it is created on first node launch.
+
+════════════════════════════════════════════════════════════════
+  BEAT 2 of 4 -- CEL expressions resolved per instance type
+════════════════════════════════════════════════════════════════
+  The headline: one manifest, one expression, different config per node.
+
+▸ The configuration -- note these are STRINGS, not numbers
+
+$ grep -A 6 '  kubelet:' 02-cel-scaling.yaml
+  kubelet:
+    maxPods: "vcpus * 8"
+    kubeReserved:
+      cpu: "max(60, vcpus * 30)"
+      memory: "memory_mib / 100"
+---
+apiVersion: karpenter.sh/v1
+  Variables: vcpus, memory_mib, default_enis, ips_per_eni, max_pods, instance_type
+  Functions: min(), max()
+
+▸ Apply the NodeClass + two NodePools pinned to different instance sizes
+
+$ kubectl apply -f 02-cel-scaling.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-2-cel unchanged
+nodepool.karpenter.sh/demo-2-small unchanged
+nodepool.karpenter.sh/demo-2-large unchanged
+  demo-2-cel                                              
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+  Validated by EVALUATING the expression against every instance type in cache,
+  not merely by compiling it.
+
+▸ Schedule one pod onto each NodePool
+
+$ kubectl apply -f 02-workload.yaml
+deployment.apps/demo-2-small unchanged
+deployment.apps/demo-2-large unchanged
+
+▸ Waiting for both nodes to register (this is the slow part, ~2-4 min)
+  2/2 nodes ready (0s elapsed) 
+
+▸ THE PAYOFF -- same expression, different resolved values
+
+$ kubectl get nodes -l 'karpenter.sh/nodepool in (demo-2-small,demo-2-large)'       -o custom-columns='NODEPOOL:.metadata.labels.karpenter\.sh/nodepool,INSTANCE:.metadata.labels.node\.kubernetes\.io/instance-type,VCPU:.status.capacity.cpu,MAXPODS:.status.allocatable.pods,ALLOC-CPU:.status.allocatable.cpu,ALLOC-MEM:.status.allocatable.memory'
+NODEPOOL       INSTANCE    VCPU   MAXPODS   ALLOC-CPU   ALLOC-MEM
+demo-2-small   m5.large    2      16        1940m       7724592Ki
+demo-2-large   m5.xlarge   4      32        3880m       15887436Ki
+
+  Expected
+    maxPods = "vcpus * 8"
+      m5.large   2 vCPU  ->  16 pods
+      m5.xlarge  4 vCPU  ->  32 pods
+
+    kubeReserved.cpu = "max(60, vcpus * 30)"
+      m5.large           ->  60m reserved   (max(60, 60))
+      m5.xlarge          ->  120m reserved  (max(60, 120))
+
+  Reserved CPU shows up as capacity minus allocatable.
+
+▸ Proof the resolved reservations reached the kubelet -- and the math closes
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/os.py", line 679, in __getitem__
+    raise KeyError(key) from None
+KeyError: 'CAPS'
+Traceback (most recent call last):
+  File "<string>", line 4, in <module>
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/os.py", line 679, in __getitem__
+    raise KeyError(key) from None
+KeyError: 'CAPS'
+  Why this matters
+    kubeReserved.memory here is not a number anyone typed -- it is
+    "memory_mib / 100" evaluated against each instance type, rounded up to a 16Mi
+    boundary, and handed to the kubelet. The arithmetic closing proves the resolved
+    value is what the kubelet is really reserving.
+
+════════════════════════════════════════════════════════════════
+  Done
+════════════════════════════════════════════════════════════════
+  Tear down with: ./cleanup.sh demo

@@ -1,0 +1,6 @@
+
+  Cannot reach the cluster.
+  AWS credentials have expired. Re-auth, then re-run:
+
+    aws login   (or: ada credentials update --once --profile default)
+

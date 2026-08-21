@@ -1,0 +1,91 @@
+# BEAT 1 -- Extended kubelet configuration.
+#
+# Every field below EXCEPT evictionHard/evictionSoft/imageGC*/cpuCFSQuota was
+# impossible to express before this change: spec.kubelet was a closed struct with
+# ~11 hardcoded fields. It is now an open map validated against the upstream
+# k8s.io/kubelet type, so any field the real kubelet accepts is accepted here.
+#
+# containerLogMaxSize, containerLogMaxFiles, podPidsLimit, registryBurst,
+# registryPullQPS, serializeImagePulls, maxParallelImagePulls and
+# topologyManagerPolicy are all "unmanaged" fields -- Karpenter does not map them
+# into bootstrap itself, it passes the raw config through. Only AL2023 does that,
+# which is what Beat 4 demonstrates.
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-1-extended
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    # --- fields the OLD closed struct already supported ---
+    evictionHard:
+      memory.available: 10%
+    evictionSoft:
+      memory.available: 15%
+    evictionSoftGracePeriod:
+      memory.available: 1m30s
+    evictionMaxPodGracePeriod: 60
+    imageGCHighThresholdPercent: 85
+    imageGCLowThresholdPercent: 80
+    cpuCFSQuota: false
+
+    # --- fields ONLY possible with the extended open-map config ---
+    # Values chosen to DIFFER from the AL2023 baseline, so /configz shows a visible
+    # change rather than a coincidence. Baseline confirmed on a control node:
+    #   registryBurst 10, registryPullQPS 5, containerLogMaxSize "10Mi",
+    #   containerLogMaxFiles 5, podPidsLimit -1, topologyManagerPolicy "none",
+    #   maxParallelImagePulls absent.
+    containerLogMaxSize: 20Mi        # baseline 10Mi
+    containerLogMaxFiles: 6          # baseline 5
+    podPidsLimit: 4096               # baseline -1 (unlimited)
+    registryBurst: 20                # baseline 10
+    registryPullQPS: 10              # baseline 5
+    maxParallelImagePulls: 5         # baseline absent
+    topologyManagerPolicy: best-effort  # baseline "none"
+
+    # NOTE: serializeImagePulls is deliberately NOT set here.
+    #   1. AL2023 already defaults it to false, so setting false proves nothing --
+    #      it would look changed while being identical to the baseline.
+    #   2. It cannot be set to true either: the kubelet rejects
+    #      maxParallelImagePulls > 1 unless serializeImagePulls is false, so
+    #      true + 5 above would fail to start the kubelet. Karpenter's
+    #      validateKubeletSemantics does not currently catch that pairing, so it
+    #      would pass validation and then break the node.
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: demo-1-extended
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["m5.large"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: demo-1-extended
+      expireAfter: 720h
+  limits:
+    cpu: 20
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m

@@ -1,0 +1,48 @@
+# Workload for BEAT 2. One pod per NodePool, so Karpenter launches exactly one
+# m5.large and one m5.xlarge and we can compare the resolved kubelet config.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-2-small
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-2-small
+  template:
+    metadata:
+      labels:
+        app: demo-2-small
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: demo-2-small
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 100m
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-2-large
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-2-large
+  template:
+    metadata:
+      labels:
+        app: demo-2-large
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: demo-2-large
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests:
+              cpu: 100m

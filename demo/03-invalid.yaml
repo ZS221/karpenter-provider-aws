@@ -1,0 +1,108 @@
+# BEAT 3 -- Invalid configuration is rejected BEFORE any node launches.
+#
+# ValidationSucceeded is a required condition on EC2NodeClass, so a false result
+# here blocks node launch entirely. Nothing reaches a real kubelet.
+#
+# Four distinct failure classes, each with its own condition reason. No NodePools
+# are needed -- these never launch anything, which is the point.
+#
+#   demo-3a  KubeletExpressionInvalid            -- expression does not compile
+#   demo-3b  KubeletExpressionEvaluationFailed   -- compiles, fails per instance type
+#   demo-3c  InvalidKubeletConfiguration         -- unknown field (typo)
+#   demo-3d  InvalidKubeletConfiguration         -- semantic rules the Go types can't express
+---
+# 3a. Compile-time: unbalanced parenthesis. Caught by celEnv.ValidateExpression.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-3a-uncompilable
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    maxPods: "min(110,"
+---
+# 3b. Eval-time: compiles fine, but divides by zero on EVERY instance type.
+# A compile-only check cannot catch this -- it is only found by evaluating the
+# expression against each instance type in the cache.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-3b-eval-failure
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    systemReserved:
+      memory: "1048576 / (vcpus - vcpus)"
+---
+# 3c. Unknown field. The open map means the API server cannot catch this, so it is
+# caught by strict-decoding against the upstream kubelet type. Without this, the
+# typo would be silently dropped and the node would come up misconfigured.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-3c-unknown-field
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    registryBurstt: 20          # <-- typo: extra 't'
+---
+# 3d. Semantic rules that the upstream Go types cannot express. All four of these
+# decode cleanly against k8s.io/kubelet and would be accepted by a naive
+# strict-decode, but each one is a real misconfiguration:
+#
+#   - "notarealsignal" is not an eviction signal; the kubelet ignores unknown
+#     keys, so the threshold the user set would silently do nothing.
+#   - 150% is out of the [0,100] range the kubelet accepts for a percentage.
+#   - evictionSoft without a matching evictionSoftGracePeriod is ignored by the
+#     kubelet.
+#   - imageGCHighThresholdPercent <= imageGCLowThresholdPercent can never collect.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: demo-3d-semantics
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  role: KarpenterNodeRole-karpenter-cel-demo
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: karpenter-cel-demo
+  kubelet:
+    evictionHard:
+      notarealsignal: 5%
+      nodefs.available: 150%
+    evictionSoft:
+      memory.available: 15%       # no matching evictionSoftGracePeriod
+    imageGCHighThresholdPercent: 70
+    imageGCLowThresholdPercent: 80   # low >= high

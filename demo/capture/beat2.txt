@@ -1,0 +1,94 @@
+
+════════════════════════════════════════════════════════════════
+  Extended Kubelet Configuration + CEL -- karpenter-cel-demo
+════════════════════════════════════════════════════════════════
+  context:       arn:aws:eks:us-west-2:000000000000:cluster/karpenter-cel-demo
+  gate:          NodeClassCEL=true
+  image:         dev:cel-demo-46ac4eb4d@sha256:c16ee343449768c96f7de67e34a67ca11bd7fe38fb8f59dc8889c1b1a08bbcd3
+
+════════════════════════════════════════════════════════════════
+  BEAT 2 of 4 -- CEL expressions resolved per instance type
+════════════════════════════════════════════════════════════════
+  The headline: one manifest, one expression, different config per node.
+
+▸ The configuration -- note these are STRINGS, not numbers
+
+$ grep -A 6 '  kubelet:' 02-cel-scaling.yaml
+  kubelet:
+    maxPods: "vcpus * 8"
+    kubeReserved:
+      cpu: "max(60, vcpus * 30)"
+      memory: "memory_mib / 100"
+---
+apiVersion: karpenter.sh/v1
+  Variables: vcpus, memory_mib, default_enis, ips_per_eni, max_pods, instance_type
+  Functions: min(), max()
+
+▸ Apply the NodeClass + two NodePools pinned to different instance sizes
+
+$ kubectl apply -f 02-cel-scaling.yaml
+ec2nodeclass.karpenter.k8s.aws/demo-2-cel unchanged
+nodepool.karpenter.sh/demo-2-small unchanged
+nodepool.karpenter.sh/demo-2-large unchanged
+  demo-2-cel                                              
+    ValidationSucceeded : True
+    reason              : ValidationSucceeded
+  Validated by EVALUATING the expression against every instance type in cache,
+  not merely by compiling it.
+
+▸ Schedule one pod onto each NodePool
+
+$ kubectl apply -f 02-workload.yaml
+deployment.apps/demo-2-small unchanged
+deployment.apps/demo-2-large unchanged
+
+▸ Waiting for both nodes to register (this is the slow part, ~2-4 min)
+  2/2 nodes ready (0s elapsed) 
+
+▸ THE PAYOFF -- same expression, different resolved values
+
+$ kubectl get nodes -l 'karpenter.sh/nodepool in (demo-2-small,demo-2-large)'       -o custom-columns='NODEPOOL:.metadata.labels.karpenter\.sh/nodepool,INSTANCE:.metadata.labels.node\.kubernetes\.io/instance-type,VCPU:.status.capacity.cpu,MAXPODS:.status.allocatable.pods,ALLOC-CPU:.status.allocatable.cpu,ALLOC-MEM:.status.allocatable.memory'
+NODEPOOL       INSTANCE    VCPU   MAXPODS   ALLOC-CPU   ALLOC-MEM
+demo-2-small   m5.large    2      16        1940m       7724592Ki
+demo-2-large   m5.xlarge   4      32        3880m       15887436Ki
+
+  Expected
+    maxPods = "vcpus * 8"
+      m5.large   2 vCPU  ->  16 pods
+      m5.xlarge  4 vCPU  ->  32 pods
+
+    kubeReserved.cpu = "max(60, vcpus * 30)"
+      m5.large           ->  60m reserved   (max(60, 60))
+      m5.xlarge          ->  120m reserved  (max(60, 120))
+
+  Reserved CPU shows up as capacity minus allocatable.
+
+▸ Proof the resolved reservations reached the kubelet -- and the math closes
+  demo-2-small   (kubeReserved.memory = 96Mi  <- resolved from "memory_mib / 100")
+      capacity                                     7739.5
+      - kubeReserved.memory                         -96.0
+      - systemReserved.memory                        -0.0
+      - evictionHard[memory.available] (100Mi)     -100.0
+      = computed allocatable                       7543.5
+        reported allocatable                       7543.5
+        closes?                                       yes
+
+  demo-2-large   (kubeReserved.memory = 176Mi  <- resolved from "memory_mib / 100")
+      capacity                                    15791.1
+      - kubeReserved.memory                        -176.0
+      - systemReserved.memory                        -0.0
+      - evictionHard[memory.available] (100Mi)     -100.0
+      = computed allocatable                      15515.1
+        reported allocatable                      15515.1
+        closes?                                       yes
+
+  Why this matters
+    kubeReserved.memory here is not a number anyone typed -- it is
+    "memory_mib / 100" evaluated against each instance type, rounded up to a 16Mi
+    boundary, and handed to the kubelet. The arithmetic closing proves the resolved
+    value is what the kubelet is really reserving.
+
+════════════════════════════════════════════════════════════════
+  Done
+════════════════════════════════════════════════════════════════
+  Tear down with: ./cleanup.sh demo

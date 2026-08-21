@@ -1,0 +1,169 @@
+=== Unit specs: kubelet config validation (pkg/apis/v1) ===
+  - should return false for a nil configuration
+  - should return false for an empty configuration
+  - should return false when every value is static
+  - should detect a string-typed maxPods expression
+  - should not treat an integer maxPods as an expression
+  - should detect a kubeReserved expression
+  - should detect a systemReserved expression
+  - should detect an expression mixed in with static quantities
+  - should ignore fields that never hold expressions
+  - should return false for a nil configuration
+  - should return false when a maxPods expression is the only expression
+  - should detect expressions in either reserved map
+  - should return an empty struct for a nil configuration
+  - should return an empty struct for an empty configuration
+  - should extract every interpreted field
+  - should ignore passthrough fields it has no representation for
+  - should keep maxPods as a string when it holds a CEL expression
+  - should return an error for a field that doesn't decode
+  - should report a concrete integer
+  - should report not-set for a nil receiver, unset maxPods, or an expression
+  - should return the integer value for a literal maxPods
+  - should return nil for an expression, and for a config that fails to decode
+  - should produce an independent copy
+  - should return nil for a nil receiver
+  - should treat every field Karpenter maps as managed
+  - should return passthrough fields Karpenter doesn't map, sorted
+  - should return empty for a nil or empty configuration
+  - an empty configuration
+  - a nil configuration
+  - the fields Karpenter reads for scheduling
+  - a field only the kubelet library knows about
+  - a nested subtree
+  - an eviction threshold as a quantity rather than a percentage
+  - matching evictionSoft and evictionSoftGracePeriod
+  - imageGC thresholds in the correct order
+  - zero-valued fields
+  - maxPods
+  - kubeReserved
+  - systemReserved
+  - maxPods alongside other fields
+  - a field the kubelet library doesn't declare
+  - an unknown field nested in a subtree
+  - an unknown field nested three levels deep
+  - a field with the wrong type
+  - a nested field with the wrong type
+  - arbitrary junk
+  - maxPods
+  - podsPerCore
+  - evictionMaxPodGracePeriod
+  - imageGCHighThresholdPercent above 100
+  - imageGCHighThresholdPercent below 0
+  - imageGCLowThresholdPercent above 100
+  - imageGCLowThresholdPercent below 0
+  - kubeReserved
+  - systemReserved
+  - kubeReserved
+  - systemReserved
+  - evictionHard
+  - evictionSoft
+  - evictionMinimumReclaim
+  - evictionSoftGracePeriod
+  - evictionHard
+  - evictionSoft
+  - evictionMinimumReclaim
+  - should reject an evictionSoftGracePeriod that isn't a duration
+  - should reject a negative evictionSoftGracePeriod
+  - should reject an evictionSoft threshold with no matching grace period
+  - should reject an evictionSoftGracePeriod with no matching threshold
+  - should reject evictionSoft with no evictionSoftGracePeriod at all
+  - should reject an imageGC high threshold at or below the low threshold
+  - should report every violation rather than stopping at the first
+  - should name the offending field in the error
+
+=== Unit specs: CEL environment (pkg/cel) ===
+  - should evaluate the ENI formula
+  - should evaluate prefix delegation with min
+  - should evaluate the kube-reserved CPU formula
+  - should evaluate the kube-reserved memory formula
+  - should evaluate min against max_pods
+  - should evaluate max with mixed int and double args
+  - should evaluate min with mixed double and int args
+  - should evaluate an expression that uses instance_type
+  - should return a negative result without erroring (dropping is handled by ResolveResourceMap)
+  - should error on integer division by zero
+  - should error on integer modulo by zero
+  - should error on double division by zero (+Inf is non-finite)
+  - should error on a NaN result
+  - evaluates reserved-resource expressions without overflow or error
+  - m5.large
+  - c5.xlarge
+  - m5.4xlarge
+  - m5.24xlarge
+  - x1e.32xlarge (~4TiB)
+  - u-24tb1.metal (24TiB, overflow worst case)
+  - evaluates to the expected result
+  - max int/int
+  - max double/double
+  - max int/double
+  - max double/int
+  - min int/int
+  - min double/double
+  - min int/double
+  - min double/int
+  - should pass through values that are already valid resource quantities
+  - should evaluate an expression and replace it with its integer result
+  - should suffix a cpu result with m so it is interpreted as millicores
+  - should allow a sub-core cpu reservation to be expressed
+  - should suffix memory with Mi and ephemeral-storage with Gi, leaving pid bare
+  - should express a percentage of node memory without a byte scale factor
+  - should be exact for power-of-two divisors of node memory
+  - should round a cpu result up to the next 10m
+  - should leave a cpu result that is already a multiple of 10m unchanged
+  - should round up rather than down, so a reservation is never smaller than requested
+  - should collapse cpu results that differ by less than the rounding granularity
+  - should round a memory result up to the next 16Mi
+  - should not round a zero result up to the granularity
+  - should not round pid or ephemeral-storage
+  - should not overflow into a negative quantity when rounding a near-max result
+  - should drop entries whose expression evaluates to a negative value
+  - should drop entries whose expression errors (e.g. division by zero)
+  - should keep valid entries while dropping invalid ones
+  - should keep an entry that evaluates to zero (only negatives are dropped)
+  - should truncate a double-returning expression to its integer string
+  - should return an empty map unchanged without invoking varsFn
+  - should return a nil map unchanged without invoking varsFn
+  - should not invoke varsFn when the map contains only literal quantities
+  - should invoke varsFn exactly once even with multiple expressions
+  - should return the error when varsFn fails, without resolving any entries
+  - should not invoke varsFn (and so not fail) when there are no expressions to evaluate
+  - should accept a valid expression
+  - should reject invalid syntax
+  - should reject undefined variables
+  - should reject a boolean return type
+  - should reject a string return type
+  - should reject an empty expression
+  - should reject a whitespace-only expression
+  - should evaluate the same and different expressions concurrently without races or wrong results
+
+=== E2E specs: extended kubelet config + CEL (test/suites) ===
+  - Linux AMIFamilies
+  - Windows AMIFamilies
+  - should schedule pods onto separate nodes when maxPods is set
+  - should schedule pods onto separate nodes when maxPods is set as a CEL expression
+  - should provision nodes when maxPods, kubeReserved, and systemReserved are all CEL expressions
+  - should resolve a maxPods CEL expression per instance type onto the node
+  - should reserve resources per instance type when kubeReserved and systemReserved are CEL expressions
+  - should schedule pods onto separate nodes when podsPerCore is set
+  - should error when amiSelectorTerms are not defined
+  - should fail for poorly formatted AMI ids
+  - should succeed when tags don't contain restricted keys
+  - should error when tags contains a restricted key
+  - should fail when securityGroupSelectorTerms has id and other filters
+  - should fail when subnetSelectorTerms has id and other filters
+  - should fail when amiSelectorTerms has id and other filters
+  - should fail when specifying role and instanceProfile at the same time
+  - should fail when specifying none of role and instanceProfile
+  - should fail to switch between an unmanaged and managed instance profile
+  - should fail to switch between a managed and unmanaged instance profile
+  - should mark ValidationSucceeded=False if imageGCHighThresholdPercent is less than imageGCLowThresholdPercent
+  - should mark ValidationSucceeded=False if imageGCHighThresholdPercent is negative
+  - should mark ValidationSucceeded=False if imageGCLowThresholdPercent is negative
+  - should mark ValidationSucceeded=False when a kubelet expression can't compile
+  - should mark ValidationSucceeded=False when a kubelet expression compiles but fails evaluation
+  - should accept a CEL expression when the NodeClassCEL gate is enabled
+  - should mark ValidationSucceeded=False for a CEL expression when the NodeClassCEL gate is disabled
+  - should still accept static kubelet values when the NodeClassCEL gate is disabled
+  - should mark ValidationSucceeded=False for a kubelet field the AMI family won't apply
+  - should accept a passthrough field on AL2023, which renders the raw config through
